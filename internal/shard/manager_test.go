@@ -17,6 +17,11 @@ func TestManager(t *testing.T) {
 	}
 	defer m.Close()
 
+	idx, err := m.CreateIndex("testindex", 3)
+	if err != nil {
+		t.Fatalf("failed to create index: %v", err)
+	}
+
 	docs := []map[string]interface{}{
 		{"id": "1", "name": "Apple"},
 		{"id": "2", "name": "Banana"},
@@ -25,7 +30,7 @@ func TestManager(t *testing.T) {
 	}
 
 	for _, doc := range docs {
-		if err := m.Index(doc["id"].(string), doc); err != nil {
+		if err := idx.Index(doc["id"].(string), doc); err != nil {
 			t.Errorf("failed to index doc %s: %v", doc["id"], err)
 		}
 	}
@@ -33,7 +38,7 @@ func TestManager(t *testing.T) {
 	// Search
 	query := bleve.NewMatchQuery("Apple")
 	req := bleve.NewSearchRequest(query)
-	res, err := m.Search(req)
+	res, err := idx.Search(req)
 	if err != nil {
 		t.Fatalf("search failed: %v", err)
 	}
