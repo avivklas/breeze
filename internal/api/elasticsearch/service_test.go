@@ -1,6 +1,7 @@
 package elasticsearch
 
 import (
+	"breeze/internal/cluster"
 	"breeze/internal/shard"
 	"bytes"
 	"net/http"
@@ -15,7 +16,8 @@ func TestBulk(t *testing.T) {
 	path := "test_bulk"
 	defer os.RemoveAll(path)
 
-	manager, err := shard.NewManager(path, 1)
+	c := cluster.NewCluster("node1", []string{"node1=localhost:8080"})
+	manager, err := shard.NewManager(path, 1, c)
 	if err != nil {
 		t.Fatalf("failed to create manager: %v", err)
 	}
