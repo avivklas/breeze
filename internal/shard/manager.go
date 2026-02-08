@@ -1,6 +1,7 @@
 package shard
 
 import (
+	"breeze/internal/cluster"
 	"breeze/internal/mapping"
 	"breeze/internal/store"
 	"encoding/json"
@@ -15,10 +16,12 @@ import (
 
 type Index struct {
 	Name      string
-	shards    []*store.Store
+	Shards    map[int]*store.Store
 	numShards int
 	path      string
 	Mapping   *mapping.Mapping
+	Cluster   *cluster.Cluster
+	Forwarder *Forwarder
 	mu        sync.RWMutex
 }
 
@@ -26,10 +29,12 @@ type Manager struct {
 	indices          map[string]*Index
 	basePath         string
 	defaultNumShards int
+	Cluster          *cluster.Cluster
+	Forwarder        *Forwarder
 	mu               sync.RWMutex
 }
 
-func NewManager(basePath string, defaultNumShards int) (*Manager, error) {
+func NewManager(basePath string, defaultNumShards int, c *cluster.Cluster) (*Manager, error) {
 	if err := os.MkdirAll(basePath, 0755); err != nil {
 		return nil, err
 	}
@@ -38,6 +43,8 @@ func NewManager(basePath string, defaultNumShards int) (*Manager, error) {
 		indices:          make(map[string]*Index),
 		basePath:         basePath,
 		defaultNumShards: defaultNumShards,
+		Cluster:          c,
+		Forwarder:        NewForwarder(),
 	}
 
 	// Load existing indices
@@ -67,28 +74,32 @@ func (m *Manager) OpenIndex(name string) (*Index, error) {
 	}
 
 	indexPath := filepath.Join(m.basePath, name)
-	// We need to know how many shards it has. 
-	// For now, we'll look for shard_n directories.
-	// In a real DB, we'd have a metadata file.
-	
+
 	numShards := m.defaultNumShards
-	// Simple discovery of shard count
-	for i := 0; ; i++ {
-		shardPath := filepath.Join(indexPath, fmt.Sprintf("shard_%d", i))
-		if _, err := os.Stat(shardPath); os.IsNotExist(err) {
-			if i > 0 {
-				numShards = i
+	// Simple discovery of shard count by looking for existing shard directories
+	// (Even if we don't own them all, they might exist if a node was repurposed)
+	maxShardFound := -1
+	entries, _ := os.ReadDir(indexPath)
+	for _, entry := range entries {
+		var sID int
+		if n, _ := fmt.Sscanf(entry.Name(), "shard_%d", &sID); n == 1 {
+			if sID > maxShardFound {
+				maxShardFound = sID
 			}
-			break
 		}
+	}
+	if maxShardFound >= 0 {
+		numShards = maxShardFound + 1
 	}
 
 	idx := &Index{
 		Name:      name,
 		numShards: numShards,
 		path:      indexPath,
-		shards:    make([]*store.Store, numShards),
+		Shards:    make(map[int]*store.Store),
 		Mapping:   mapping.NewMapping(),
+		Cluster:   m.Cluster,
+		Forwarder: m.Forwarder,
 	}
 
 	// Load mapping if exists
@@ -97,24 +108,28 @@ func (m *Manager) OpenIndex(name string) (*Index, error) {
 		json.Unmarshal(data, &idx.Mapping.Fields)
 	}
 
+	// Only open shards owned by this node
 	for i := 0; i < numShards; i++ {
-		shardPath := filepath.Join(indexPath, fmt.Sprintf("shard_%d", i))
-		s, err := store.Open(shardPath, true)
-		if err != nil {
-			return nil, err
+		owner := m.Cluster.GetShardOwner(name, i, numShards)
+		if m.Cluster.IsLocal(owner) {
+			shardPath := filepath.Join(indexPath, fmt.Sprintf("shard_%d", i))
+			s, err := store.Open(shardPath, true)
+			if err != nil {
+				return nil, err
+			}
+			idx.Shards[i] = s
 		}
-		idx.shards[i] = s
 	}
 
 	m.indices[name] = idx
 	return idx, nil
 }
 
-func (m *Manager) CreateIndex(name string, numShards int) (*Index, error) {
+func (m *Manager) CreateIndex(name string, numShards int, forward bool) (*Index, error) {
 	m.mu.Lock()
 	if _, ok := m.indices[name]; ok {
 		m.mu.Unlock()
-		return nil, fmt.Errorf("index %s already exists", name)
+		return m.indices[name], nil
 	}
 	m.mu.Unlock()
 
@@ -127,7 +142,20 @@ func (m *Manager) CreateIndex(name string, numShards int) (*Index, error) {
 		return nil, err
 	}
 
-	return m.OpenIndex(name)
+	idx, err := m.OpenIndex(name)
+	if err != nil {
+		return nil, err
+	}
+
+	if forward {
+		for _, node := range m.Cluster.Nodes {
+			if !m.Cluster.IsLocal(node) {
+				m.Forwarder.ForwardCreateIndex(node, name, numShards)
+			}
+		}
+	}
+
+	return idx, nil
 }
 
 func (m *Manager) GetIndex(name string) *Index {
@@ -147,6 +175,8 @@ func (m *Manager) ListIndices() []string {
 }
 
 func (idx *Index) saveMapping() {
+	// Only save mapping if we are a "leader" or just let every node save its sniffed view.
+	// For now, let every node save its local view of the mapping.
 	mappingPath := filepath.Join(idx.path, "mapping.json")
 	idx.Mapping.Mu.RLock()
 	data, _ := json.Marshal(idx.Mapping.Fields)
@@ -154,7 +184,7 @@ func (idx *Index) saveMapping() {
 	os.WriteFile(mappingPath, data, 0644)
 }
 
-func (idx *Index) getShardID(id string) int {
+func (idx *Index) GetShardID(id string) int {
 	hash := crc32.ChecksumIEEE([]byte(id))
 	return int(hash % uint32(idx.numShards))
 }
@@ -163,79 +193,166 @@ func (idx *Index) Index(id string, data map[string]interface{}) error {
 	if idx.Mapping.Sniff(data) {
 		idx.saveMapping()
 	}
-	shardID := idx.getShardID(id)
-	return idx.shards[shardID].Index(id, data)
+	shardID := idx.GetShardID(id)
+	owner := idx.Cluster.GetShardOwner(idx.Name, shardID, idx.numShards)
+
+	if idx.Cluster.IsLocal(owner) {
+		return idx.Shards[shardID].Index(id, data)
+	}
+	return idx.Forwarder.ForwardIndex(owner, idx.Name, id, data)
 }
 
 func (idx *Index) BatchIndex(ids []string, data []map[string]interface{}) error {
-	shardGroupsIds := make([][]string, idx.numShards)
-	shardGroupsData := make([][]map[string]interface{}, idx.numShards)
+	// Split batch into local vs remote groups
+	nodeGroupsIds := make(map[string][]string)
+	nodeGroupsData := make(map[string][]map[string]interface{})
 
 	for i, id := range ids {
 		d := data[i]
 		if idx.Mapping.Sniff(d) {
 			idx.saveMapping()
 		}
-		shardID := idx.getShardID(id)
-		shardGroupsIds[shardID] = append(shardGroupsIds[shardID], id)
-		shardGroupsData[shardID] = append(shardGroupsData[shardID], d)
+		shardID := idx.GetShardID(id)
+		owner := idx.Cluster.GetShardOwner(idx.Name, shardID, idx.numShards)
+
+		nodeGroupsIds[owner.ID] = append(nodeGroupsIds[owner.ID], id)
+		nodeGroupsData[owner.ID] = append(nodeGroupsData[owner.ID], d)
 	}
 
 	var wg sync.WaitGroup
-	errors := make([]error, idx.numShards)
-	for i := 0; i < idx.numShards; i++ {
-		if len(shardGroupsIds[i]) == 0 {
-			continue
-		}
+	var mu sync.Mutex
+	var finalErr error
+
+	for nodeID, gIds := range nodeGroupsIds {
+		nodeID := nodeID
+		gIds := gIds
+		gData := nodeGroupsData[nodeID]
+
 		wg.Add(1)
-		go func(i_ int) {
+		go func() {
 			defer wg.Done()
-			errors[i_] = idx.shards[i_].BatchIndex(shardGroupsIds[i_], shardGroupsData[i_])
-		}(i)
+			var err error
+			node, _ := idx.Cluster.GetNodeByID(nodeID)
+			if idx.Cluster.IsLocal(node) {
+				// Internal batch split by shard
+				shardGroupsIds := make(map[int][]string)
+				shardGroupsData := make(map[int][]map[string]interface{})
+				for j, id := range gIds {
+					sID := idx.GetShardID(id)
+					shardGroupsIds[sID] = append(shardGroupsIds[sID], id)
+					shardGroupsData[sID] = append(shardGroupsData[sID], gData[j])
+				}
+				for sID, sIds := range shardGroupsIds {
+					err = idx.Shards[sID].BatchIndex(sIds, shardGroupsData[sID])
+					if err != nil {
+						break
+					}
+				}
+			} else {
+				err = idx.Forwarder.ForwardBatchIndex(node, idx.Name, gIds, gData)
+			}
+
+			if err != nil {
+				mu.Lock()
+				finalErr = err
+				mu.Unlock()
+			}
+		}()
 	}
 	wg.Wait()
-
-	for _, err := range errors {
-		if err != nil {
-			return err
-		}
-	}
-	return nil
+	return finalErr
 }
 
 func (idx *Index) Get(id string) (map[string]interface{}, error) {
-	shardID := idx.getShardID(id)
-	return idx.shards[shardID].Get(id)
+	shardID := idx.GetShardID(id)
+	owner := idx.Cluster.GetShardOwner(idx.Name, shardID, idx.numShards)
+
+	if idx.Cluster.IsLocal(owner) {
+		return idx.Shards[shardID].Get(id)
+	}
+	return idx.Forwarder.ForwardGet(owner, idx.Name, id)
 }
 
 func (idx *Index) Delete(id string) error {
-	shardID := idx.getShardID(id)
-	return idx.shards[shardID].Delete(id)
+	shardID := idx.GetShardID(id)
+	owner := idx.Cluster.GetShardOwner(idx.Name, shardID, idx.numShards)
+
+	if idx.Cluster.IsLocal(owner) {
+		return idx.Shards[shardID].Delete(id)
+	}
+	return idx.Forwarder.ForwardDelete(owner, idx.Name, id)
 }
 
 func (idx *Index) Search(req *bleve.SearchRequest) (*bleve.SearchResult, error) {
+	// Distributed Search: Fan-out to all nodes in the cluster
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var finalResult *bleve.SearchResult
+	var finalErr error
+
+	for _, node := range idx.Cluster.Nodes {
+		node := node
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var res *bleve.SearchResult
+			var err error
+
+			if idx.Cluster.IsLocal(node) {
+				res, err = idx.LocalSearch(req)
+			} else {
+				res, err = idx.Forwarder.ForwardSearch(node, idx.Name, req)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				finalErr = err
+				return
+			}
+			if finalResult == nil {
+				finalResult = res
+			} else {
+				finalResult.Merge(res)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if finalErr != nil {
+		return nil, finalErr
+	}
+	if finalResult == nil {
+		return &bleve.SearchResult{}, nil
+	}
+	return finalResult, nil
+}
+
+func (idx *Index) LocalSearch(req *bleve.SearchRequest) (*bleve.SearchResult, error) {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
 	var wg sync.WaitGroup
-	results := make([]*bleve.SearchResult, idx.numShards)
-	errors := make([]error, idx.numShards)
+	results := make(map[int]*bleve.SearchResult)
+	errors := make(map[int]error)
 
-	for i := 0; i < idx.numShards; i++ {
+	for sID, s := range idx.Shards {
+		sID := sID
+		s := s
 		wg.Add(1)
-		go func(i_ int) {
+		go func() {
 			defer wg.Done()
-			res, err := idx.shards[i_].Search(req)
-			results[i_] = res
-			errors[i_] = err
-		}(i)
+			res, err := s.Search(req)
+			results[sID] = res
+			errors[sID] = err
+		}()
 	}
 	wg.Wait()
 
 	var finalResult *bleve.SearchResult
-	for i, res := range results {
-		if errors[i] != nil {
-			return nil, errors[i]
+	for sID, res := range results {
+		if errors[sID] != nil {
+			return nil, errors[sID]
 		}
 		if res == nil {
 			continue
@@ -246,17 +363,15 @@ func (idx *Index) Search(req *bleve.SearchRequest) (*bleve.SearchResult, error) 
 			finalResult.Merge(res)
 		}
 	}
-
 	if finalResult == nil {
 		return &bleve.SearchResult{}, nil
 	}
-
 	return finalResult, nil
 }
 
 func (idx *Index) Close() error {
 	idx.saveMapping()
-	for _, s := range idx.shards {
+	for _, s := range idx.Shards {
 		if err := s.Close(); err != nil {
 			return err
 		}
