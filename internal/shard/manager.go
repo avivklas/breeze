@@ -72,6 +72,43 @@ func (m *Manager) Index(id string, data map[string]interface{}) error {
 	return m.shards[shardID].Index(id, data)
 }
 
+func (m *Manager) BatchIndex(ids []string, data []map[string]interface{}) error {
+	// Group documents by shard
+	shardGroupsIds := make([][]string, m.numShards)
+	shardGroupsData := make([][]map[string]interface{}, m.numShards)
+
+	for i, id := range ids {
+		d := data[i]
+		if m.Mapping.Sniff(d) {
+			m.saveMapping()
+		}
+		shardID := m.getShardID(id)
+		shardGroupsIds[shardID] = append(shardGroupsIds[shardID], id)
+		shardGroupsData[shardID] = append(shardGroupsData[shardID], d)
+	}
+
+	var wg sync.WaitGroup
+	errors := make([]error, m.numShards)
+	for i := 0; i < m.numShards; i++ {
+		if len(shardGroupsIds[i]) == 0 {
+			continue
+		}
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			errors[idx] = m.shards[idx].BatchIndex(shardGroupsIds[idx], shardGroupsData[idx])
+		}(i)
+	}
+	wg.Wait()
+
+	for _, err := range errors {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (m *Manager) Get(id string) (map[string]interface{}, error) {
 	shardID := m.getShardID(id)
 	return m.shards[shardID].Get(id)
