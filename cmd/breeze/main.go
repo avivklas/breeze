@@ -3,6 +3,7 @@ package main
 import (
 	"breeze/internal/api/elasticsearch"
 	"breeze/internal/api/graphql"
+	"breeze/internal/cluster"
 	"breeze/internal/shard"
 	"bytes"
 	"encoding/json"
@@ -17,10 +18,13 @@ import (
 )
 
 var (
-	dbPath    string
-	numShards int
-	port      int
-	serverURL string
+	dbPath       string
+	numShards    int
+	port         int
+	internalPort int
+	serverURL    string
+	nodeID       string
+	peers        []string
 )
 
 func main() {
@@ -35,7 +39,10 @@ func main() {
 	}
 	startCmd.Flags().StringVarP(&dbPath, "path", "p", "./data", "Path to database storage")
 	startCmd.Flags().IntVarP(&numShards, "shards", "s", 5, "Number of shards")
-	startCmd.Flags().IntVarP(&port, "port", "v", 8080, "Server port")
+	startCmd.Flags().IntVarP(&port, "port", "v", 8080, "Public API port")
+	startCmd.Flags().IntVarP(&internalPort, "internal-port", "l", 9090, "Internal cluster port")
+	startCmd.Flags().StringVarP(&nodeID, "node-id", "i", "node1", "Unique node ID")
+	startCmd.Flags().StringSliceVar(&peers, "peers", []string{}, "Cluster peers (format: id=host:port)")
 
 	var indexCmd = &cobra.Command{
 		Use:   "index [id] [json]",
@@ -69,25 +76,27 @@ func main() {
 }
 
 func runServer() {
-	manager, err := shard.NewManager(dbPath, numShards)
+	c := cluster.NewCluster(nodeID, peers)
+	manager, err := shard.NewManager(dbPath, numShards, c)
 	if err != nil {
 		log.Fatalf("Failed to initialize manager: %v", err)
 	}
 	defer manager.Close()
 
+	// Start cluster server for internal lightweight communication
+	clusterServer := shard.NewClusterServer(manager, fmt.Sprintf(":%d", internalPort))
+	if err := clusterServer.Start(); err != nil {
+		log.Fatalf("Failed to start cluster server: %v", err)
+	}
+
 	gqlService := graphql.NewService(manager)
 	esService := elasticsearch.NewService(manager)
 
 	r := gin.Default()
-	
-	// GraphQL endpoints
 	r.POST("/graphql", gqlService.Handler())
 	r.POST("/graphql/:index", gqlService.Handler())
-
-	// Elasticsearch endpoints
 	esService.RegisterHandlers(r)
 
-	// Metadata endpoint
 	r.GET("/_metadata", func(c *gin.Context) {
 		indices := manager.ListIndices()
 		metadata := make(map[string]interface{})
@@ -100,7 +109,7 @@ func runServer() {
 		c.JSON(200, metadata)
 	})
 
-	fmt.Printf("Breeze server starting on port %d...\n", port)
+	fmt.Printf("Breeze server %s starting on API port %d, Cluster port %d...\n", nodeID, port, internalPort)
 	if err := r.Run(fmt.Sprintf(":%d", port)); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
@@ -125,7 +134,7 @@ func callQuery(query string) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	
+
 	var prettyJSON bytes.Buffer
 	if err := json.Indent(&prettyJSON, body, "", "  "); err == nil {
 		fmt.Println(prettyJSON.String())
