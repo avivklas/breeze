@@ -6,10 +6,11 @@ Breeze is a standalone, sharded database system built on top of the [Bleve](http
 
 - **Full CRUD:** Create, Read, Update, and Delete JSON documents.
 - **Search:** Full-text search powered by Bleve.
-- **Dynamic GraphQL:** Automatically generates a GraphQL schema by sniffing your JSON documents.
-- **Elasticsearch Compatible:** Supports a subset of the Elasticsearch REST API (Document and Search APIs).
+- **Dynamic GraphQL:** Automatically generates a GraphQL schema by sniffing your JSON documents. Multi-index support available via `/graphql/:index`.
+- **Elasticsearch Compatible:** Supports a significant subset of the Elasticsearch REST API, including Document, Search, Bulk, and Multi-Search APIs.
+- **Kibana Support:** Fully compatible with Kibana (tested with v8.10.2) for data visualization and exploration.
 - **ACID Compliant:** Uses a Write-Ahead Log (WAL) to ensure durability for single-document operations.
-- **Sharding:** Automatically distributes data across multiple shards for scalability.
+- **Sharding:** Automatically distributes data across multiple shards per index for scalability.
 - **CLI Tool:** Built-in CLI for server management and data operations.
 
 ## Quick Start
@@ -47,8 +48,19 @@ Using CLI:
 
 Using GraphQL:
 ```bash
-curl -X POST http://localhost:8080/graphql -d '{"query": "query { search(query: \"Breeze\") { id name description } }"}'
+curl -X POST http://localhost:8080/graphql/default -d '{"query": "query { search(query: \"Breeze\") { id name description } }"}'
 ```
+
+## Kibana Connection
+
+Breeze implements the necessary Elasticsearch handshake endpoints to allow Kibana to connect directly.
+
+1. Install Kibana 8.10.2.
+2. Update `kibana.yml`:
+   ```yaml
+   elasticsearch.hosts: ["http://localhost:8080"]
+   ```
+3. Start Kibana and navigate to `http://localhost:5601`.
 
 ## Docker & Kubernetes
 
@@ -74,8 +86,9 @@ kubectl apply -f k8s/breeze.yaml
 ## Architecture
 
 Breeze uses a **Coordinator + Shard** architecture. Every node can act as a coordinator:
-- **Writes:** Documents are hashed by ID (CRC32) and routed to the corresponding shard.
+- **Multi-Index:** Each index is managed independently with its own shard set and mapping.
+- **Writes:** Documents are hashed by ID (CRC32) and routed to the corresponding shard within the index.
 - **Reads:** Requests for specific IDs are routed to the owner shard.
-- **Searches:** Queries are fanned out to all shards and the results are merged.
+- **Searches:** Queries are fanned out to all shards of the target index and the results are merged.
 
 Durability is ensured by writing every operation to a **Write-Ahead Log (WAL)** before it is committed to the underlying Bleve index.
