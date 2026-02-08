@@ -193,8 +193,14 @@ func (s *Service) Handler() gin.HandlerFunc {
 			// Try to open it if it exists in manager but not in service
 			idx := s.manager.GetIndex(name)
 			if idx == nil {
-				c.JSON(http.StatusNotFound, gin.H{"error": "index not found"})
-				return
+				// Try to create it/open it? For GraphQL we usually expect it to exist
+				// but let's try OpenIndex just in case it's on disk
+				var err error
+				idx, err = s.manager.OpenIndex(name)
+				if err != nil || idx == nil {
+					c.JSON(http.StatusNotFound, gin.H{"error": "index not found"})
+					return
+				}
 			}
 			is = &IndexService{index: idx}
 			is.rebuildSchema()
