@@ -13,43 +13,72 @@ import (
 	"github.com/graphql-go/graphql"
 )
 
-type Service struct {
-	manager     *shard.Manager
+type IndexService struct {
+	index       *shard.Index
 	schema      graphql.Schema
 	mu          sync.RWMutex
-	lastMapping int // Number of fields in mapping
+	lastMapping int
 }
 
-func NewService(m *shard.Manager) (*Service, error) {
-	s := &Service{manager: m}
-	if err := s.rebuildSchema(); err != nil {
-		return nil, err
+type Service struct {
+	manager       *shard.Manager
+	indexServices map[string]*IndexService
+	mu            sync.RWMutex
+}
+
+func NewService(m *shard.Manager) *Service {
+	s := &Service{
+		manager:       m,
+		indexServices: make(map[string]*IndexService),
 	}
-	// Background schema rebuilder if mapping changes
-	go s.watchMapping()
-	return s, nil
+	go s.watchIndices()
+	return s
 }
 
-func (s *Service) watchMapping() {
+func (s *Service) watchIndices() {
 	for {
 		time.Sleep(5 * time.Second)
-		s.manager.Mapping.Mu.RLock()
-		currentFields := len(s.manager.Mapping.Fields)
-		s.manager.Mapping.Mu.RUnlock()
+		names := s.manager.ListIndices()
+		for _, name := range names {
+			s.mu.RLock()
+			_, ok := s.indexServices[name]
+			s.mu.RUnlock()
 
-		s.mu.RLock()
-		lastFields := s.lastMapping
-		s.mu.RUnlock()
-
-		if currentFields != lastFields {
-			fmt.Println("Mapping changed, rebuilding GraphQL schema...")
-			s.rebuildSchema()
+			if !ok {
+				idx := s.manager.GetIndex(name)
+				if idx != nil {
+					is := &IndexService{index: idx}
+					is.rebuildSchema()
+					s.mu.Lock()
+					s.indexServices[name] = is
+					s.mu.Unlock()
+					go is.watchMapping()
+				}
+			}
 		}
 	}
 }
 
-func (s *Service) rebuildSchema() error {
-	docType := s.manager.Mapping.BuildGraphQLType("Document")
+func (is *IndexService) watchMapping() {
+	for {
+		time.Sleep(5 * time.Second)
+		is.index.Mapping.Mu.RLock()
+		currentFields := len(is.index.Mapping.Fields)
+		is.index.Mapping.Mu.RUnlock()
+
+		is.mu.RLock()
+		lastFields := is.lastMapping
+		is.mu.RUnlock()
+
+		if currentFields != lastFields {
+			fmt.Printf("Mapping changed for index %s, rebuilding GraphQL schema...\n", is.index.Name)
+			is.rebuildSchema()
+		}
+	}
+}
+
+func (is *IndexService) rebuildSchema() error {
+	docType := is.index.Mapping.BuildGraphQLType("Document")
 
 	queryType := graphql.NewObject(graphql.ObjectConfig{
 		Name: "Query",
@@ -61,7 +90,7 @@ func (s *Service) rebuildSchema() error {
 				},
 				Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 					id := p.Args["id"].(string)
-					return s.manager.Get(id)
+					return is.index.Get(id)
 				},
 			},
 			"search": &graphql.Field{
@@ -74,11 +103,11 @@ func (s *Service) rebuildSchema() error {
 					q := bleve.NewQueryStringQuery(queryString)
 					req := bleve.NewSearchRequest(q)
 					req.Fields = []string{"_source"}
-					res, err := s.manager.Search(req)
+					res, err := is.index.Search(req)
 					if err != nil {
 						return nil, err
 					}
-					
+
 					var results []map[string]interface{}
 					for _, hit := range res.Hits {
 						source := make(map[string]interface{})
@@ -110,7 +139,7 @@ func (s *Service) rebuildSchema() error {
 					if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
 						return nil, err
 					}
-					if err := s.manager.Index(id, data); err != nil {
+					if err := is.index.Index(id, data); err != nil {
 						return nil, err
 					}
 					return "ok", nil
@@ -123,7 +152,7 @@ func (s *Service) rebuildSchema() error {
 				},
 				Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 					id := p.Args["id"].(string)
-					if err := s.manager.Delete(id); err != nil {
+					if err := is.index.Delete(id); err != nil {
 						return nil, err
 					}
 					return "ok", nil
@@ -140,17 +169,41 @@ func (s *Service) rebuildSchema() error {
 		return err
 	}
 
-	s.mu.Lock()
-	s.schema = schema
-	s.manager.Mapping.Mu.RLock()
-	s.lastMapping = len(s.manager.Mapping.Fields)
-	s.manager.Mapping.Mu.RUnlock()
-	s.mu.Unlock()
+	is.mu.Lock()
+	is.schema = schema
+	is.index.Mapping.Mu.RLock()
+	is.lastMapping = len(is.index.Mapping.Fields)
+	is.index.Mapping.Mu.RUnlock()
+	is.mu.Unlock()
 	return nil
 }
 
 func (s *Service) Handler() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		name := c.Param("index")
+		if name == "" {
+			name = "default"
+		}
+
+		s.mu.RLock()
+		is, ok := s.indexServices[name]
+		s.mu.RUnlock()
+
+		if !ok {
+			// Try to open it if it exists in manager but not in service
+			idx := s.manager.GetIndex(name)
+			if idx == nil {
+				c.JSON(http.StatusNotFound, gin.H{"error": "index not found"})
+				return
+			}
+			is = &IndexService{index: idx}
+			is.rebuildSchema()
+			s.mu.Lock()
+			s.indexServices[name] = is
+			s.mu.Unlock()
+			go is.watchMapping()
+		}
+
 		var request struct {
 			Query         string                 `json:"query"`
 			OperationName string                 `json:"operationName"`
@@ -162,9 +215,9 @@ func (s *Service) Handler() gin.HandlerFunc {
 			return
 		}
 
-		s.mu.RLock()
-		schema := s.schema
-		s.mu.RUnlock()
+		is.mu.RLock()
+		schema := is.schema
+		is.mu.RUnlock()
 
 		result := graphql.Do(graphql.Params{
 			Schema:         schema,
