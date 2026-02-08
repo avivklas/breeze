@@ -1,0 +1,7 @@
+elasticsearch-8.10.0/
+data/
+server.log
+breeze
+test_db
+test_shards
+test_bulk
