@@ -75,18 +75,29 @@ func runServer() {
 	}
 	defer manager.Close()
 
-	gqlService, err := graphql.NewService(manager)
-	if err != nil {
-		log.Fatalf("Failed to initialize GraphQL service: %v", err)
-	}
-
+	gqlService := graphql.NewService(manager)
 	esService := elasticsearch.NewService(manager)
 
 	r := gin.Default()
+	
+	// GraphQL endpoints
 	r.POST("/graphql", gqlService.Handler())
+	r.POST("/graphql/:index", gqlService.Handler())
+
+	// Elasticsearch endpoints
 	esService.RegisterHandlers(r)
+
+	// Metadata endpoint
 	r.GET("/_metadata", func(c *gin.Context) {
-		c.JSON(200, manager.GetMetadata())
+		indices := manager.ListIndices()
+		metadata := make(map[string]interface{})
+		for _, name := range indices {
+			idx := manager.GetIndex(name)
+			if idx != nil {
+				metadata[name] = idx.GetMetadata()
+			}
+		}
+		c.JSON(200, metadata)
 	})
 
 	fmt.Printf("Breeze server starting on port %d...\n", port)
