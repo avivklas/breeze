@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: breeze
+spec:
+  serviceName: "breeze"
+  replicas: 1
+  selector:
+    matchLabels:
+      app: breeze
+  template:
+    metadata:
+      labels:
+        app: breeze
+    spec:
+      containers:
+      - name: breeze
+        image: breeze:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          name: api
+        args: ["start", "--path", "/data", "--port", "8080", "--shards", "5"]
+        volumeMounts:
+        - name: breeze-data
+          mountPath: /data
+  volumeClaimTemplates:
+  - metadata:
+      name: breeze-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: breeze
+spec:
+  selector:
+    app: breeze
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080
+  type: NodePort
