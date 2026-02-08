@@ -333,6 +333,7 @@ func (idx *Index) LocalSearch(req *bleve.SearchRequest) (*bleve.SearchResult, er
 	defer idx.mu.RUnlock()
 
 	var wg sync.WaitGroup
+	var mu sync.Mutex
 	results := make(map[int]*bleve.SearchResult)
 	errors := make(map[int]error)
 
@@ -343,8 +344,10 @@ func (idx *Index) LocalSearch(req *bleve.SearchRequest) (*bleve.SearchResult, er
 		go func() {
 			defer wg.Done()
 			res, err := s.Search(req)
+			mu.Lock()
 			results[sID] = res
 			errors[sID] = err
+			mu.Unlock()
 		}()
 	}
 	wg.Wait()
