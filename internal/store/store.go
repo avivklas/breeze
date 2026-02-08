@@ -150,6 +150,31 @@ func (s *Store) Index(id string, data map[string]interface{}) error {
 	return s.index.Index(id, data)
 }
 
+func (s *Store) BatchIndex(ids []string, data []map[string]interface{}) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	batch := s.index.NewBatch()
+	for i, id := range ids {
+		d := data[i]
+		sourceBytes, _ := json.Marshal(d)
+		d["_source"] = string(sourceBytes)
+
+		entry := LogEntry{
+			Op:   OpIndex,
+			ID:   id,
+			Data: d,
+		}
+		entryBytes, _ := json.Marshal(entry)
+		lastIndex, _ := s.log.LastIndex()
+		s.log.Write(lastIndex+1, entryBytes)
+
+		batch.Index(id, d)
+	}
+
+	return s.index.Batch(batch)
+}
+
 func (s *Store) Delete(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -206,7 +231,6 @@ func (s *Store) Search(req *bleve.SearchRequest) (*bleve.SearchResult, error) {
 
 func GetDefaultMapping() mapping.IndexMapping {
     m := bleve.NewIndexMapping()
-    // Explicitly map _source to be stored but not indexed
     sourceFieldMapping := bleve.NewTextFieldMapping()
     sourceFieldMapping.Store = true
     sourceFieldMapping.Index = false
