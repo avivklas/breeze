@@ -98,7 +98,7 @@ func (s *Service) getOrCreateIndex(name string) (*shard.Index, error) {
 	if idx != nil {
 		return idx, nil
 	}
-	return s.manager.CreateIndex(name, 0)
+	return s.manager.CreateIndex(name, 0, true)
 }
 
 func (s *Service) Info(c *gin.Context) {
@@ -371,7 +371,12 @@ func (s *Service) NodeStats(c *gin.Context) {
 
 func (s *Service) CreateIndex(c *gin.Context) {
 	name := c.Param("index")
-	_, err := s.manager.CreateIndex(name, 0)
+	forward := c.Query("forward") != "false"
+	shards := 0
+	fmt.Sscanf(c.Query("shards"), "%d", &shards)
+
+	_, err := s.manager.CreateIndex(name, shards, forward)
+
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": gin.H{
@@ -408,9 +413,20 @@ func (s *Service) Index(c *gin.Context) {
 		return
 	}
 
-	if err := idx.Index(id, data); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+	if c.Query("forward") == "false" {
+		// Only write locally
+		shardID := idx.GetShardID(id)
+		if s, ok := idx.Shards[shardID]; ok {
+			s.Index(id, data)
+		} else {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "shard not local"})
+			return
+		}
+	} else {
+		if err := idx.Index(id, data); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -473,7 +489,25 @@ func (s *Service) Bulk(c *gin.Context) {
 		if err != nil {
 			continue
 		}
-		idx.BatchIndex(b.ids, b.docs)
+
+		if c.Query("forward") == "false" {
+			// Write locally to shards we own
+			shardGroupsIds := make(map[int][]string)
+			shardGroupsData := make(map[int][]map[string]interface{})
+			for j, id := range b.ids {
+				sID := idx.GetShardID(id)
+				if _, ok := idx.Shards[sID]; ok {
+					shardGroupsIds[sID] = append(shardGroupsIds[sID], id)
+					shardGroupsData[sID] = append(shardGroupsData[sID], b.docs[j])
+				}
+			}
+			for sID, sIds := range shardGroupsIds {
+				idx.Shards[sID].BatchIndex(sIds, shardGroupsData[sID])
+			}
+		} else {
+			idx.BatchIndex(b.ids, b.docs)
+		}
+
 		for _, id := range b.ids {
 			responseItems = append(responseItems, gin.H{
 				"index": gin.H{
@@ -697,27 +731,37 @@ func (s *Service) Search(c *gin.Context) {
 		return
 	}
 
-	q := bleve.NewQueryStringQuery(queryStr)
-	req := bleve.NewSearchRequest(q)
-	req.Fields = []string{"_source"}
-	res, err := idx.Search(req)
+	var res *bleve.SearchResult
+	var err error
+
+	if c.Query("local") == "true" {
+		res, err = idx.LocalSearch(bleve.NewSearchRequest(bleve.NewQueryStringQuery(queryStr)))
+	} else {
+		q := bleve.NewQueryStringQuery(queryStr)
+		req := bleve.NewSearchRequest(q)
+		req.Fields = []string{"_source"}
+		res, err = idx.Search(req)
+	}
+
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
 	hits := []gin.H{}
-	for _, hit := range res.Hits {
-		source := make(map[string]interface{})
-		if s, ok := hit.Fields["_source"].(string); ok {
-			json.Unmarshal([]byte(s), &source)
+	if res != nil {
+		for _, hit := range res.Hits {
+			source := make(map[string]interface{})
+			if s, ok := hit.Fields["_source"].(string); ok {
+				json.Unmarshal([]byte(s), &source)
+			}
+			hits = append(hits, gin.H{
+				"_index":  name,
+				"_id":     hit.ID,
+				"_score":  hit.Score,
+				"_source": source,
+			})
 		}
-		hits = append(hits, gin.H{
-			"_index":  name,
-			"_id":     hit.ID,
-			"_score":  hit.Score,
-			"_source": source,
-		})
 	}
 
 	c.JSON(http.StatusOK, gin.H{
