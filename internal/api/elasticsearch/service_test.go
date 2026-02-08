@@ -26,9 +26,9 @@ func TestBulk(t *testing.T) {
 	r := gin.Default()
 	r.POST("/_bulk", service.Bulk)
 
-	bulkData := `{"index":{"_id":"1"}}
+	bulkData := `{"index":{"_index":"testindex","_id":"1"}}
 {"name":"test1"}
-{"index":{"_id":"2"}}
+{"index":{"_index":"testindex","_id":"2"}}
 {"name":"test2"}
 `
 	req, _ := http.NewRequest("POST", "/_bulk", bytes.NewBufferString(bulkData))
@@ -39,12 +39,17 @@ func TestBulk(t *testing.T) {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
 
-	doc, _ := manager.Get("1")
+	idx := manager.GetIndex("testindex")
+	if idx == nil {
+		t.Fatalf("index testindex not created")
+	}
+
+	doc, _ := idx.Get("1")
 	if doc["name"] != "test1" {
 		t.Errorf("expected test1, got %v", doc["name"])
 	}
 
-	doc2, _ := manager.Get("2")
+	doc2, _ := idx.Get("2")
 	if doc2["name"] != "test2" {
 		t.Errorf("expected test2, got %v", doc2["name"])
 	}
