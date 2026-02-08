@@ -1,6 +1,7 @@
 package shard
 
 import (
+	"breeze/internal/cluster"
 	"os"
 	"testing"
 
@@ -11,13 +12,14 @@ func TestManager(t *testing.T) {
 	path := "test_shards"
 	defer os.RemoveAll(path)
 
-	m, err := NewManager(path, 3)
+	c := cluster.NewCluster("node1", []string{"node1=localhost:8080"})
+	m, err := NewManager(path, 3, c)
 	if err != nil {
 		t.Fatalf("failed to create manager: %v", err)
 	}
 	defer m.Close()
 
-	idx, err := m.CreateIndex("testindex", 3)
+	idx, err := m.CreateIndex("testindex", 3, true)
 	if err != nil {
 		t.Fatalf("failed to create index: %v", err)
 	}
