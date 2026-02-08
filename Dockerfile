@@ -25,7 +25,7 @@ COPY --from=builder /app/breeze .
 RUN mkdir -p /root/data
 
 # Expose ports
-EXPOSE 8080
+EXPOSE 8080 9090
 
 # Command to run
 ENTRYPOINT ["./breeze"]
