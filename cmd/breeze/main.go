@@ -22,6 +22,7 @@ var (
 	numShards    int
 	port         int
 	internalPort int
+	publicAddr   string
 	serverURL    string
 	nodeID       string
 	peers        []string
@@ -41,6 +42,7 @@ func main() {
 	startCmd.Flags().IntVarP(&numShards, "shards", "s", 5, "Number of shards")
 	startCmd.Flags().IntVarP(&port, "port", "v", 8080, "Public API port")
 	startCmd.Flags().IntVarP(&internalPort, "internal-port", "l", 9090, "Internal cluster port")
+	startCmd.Flags().StringVar(&publicAddr, "public-addr", "127.0.0.1:8080", "Public address for discovery")
 	startCmd.Flags().StringVarP(&nodeID, "node-id", "i", "node1", "Unique node ID")
 	startCmd.Flags().StringSliceVar(&peers, "peers", []string{}, "Cluster peers (format: id=host:port)")
 
@@ -90,7 +92,7 @@ func runServer() {
 	}
 
 	gqlService := graphql.NewService(manager)
-	esService := elasticsearch.NewService(manager)
+	esService := elasticsearch.NewService(manager, publicAddr)
 
 	r := gin.Default()
 	r.POST("/graphql", gqlService.Handler())
