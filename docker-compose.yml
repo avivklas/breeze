@@ -7,7 +7,7 @@ services:
       - "8081:8080"
     volumes:
       - breeze1-data:/root/data
-    command: start --path /root/data --port 8080 --internal-port 9090 --node-id node1 --peers node1=breeze1:9090,node2=breeze2:9090,node3=breeze3:9090 --shards 6
+    command: start --path /root/data --port 8080 --internal-port 9090 --public-addr breeze1:8080 --node-id node1 --peers node1=breeze1:9090,node2=breeze2:9090,node3=breeze3:9090 --shards 6
     networks:
       - breeze-net
 
@@ -17,7 +17,7 @@ services:
       - "8082:8080"
     volumes:
       - breeze2-data:/root/data
-    command: start --path /root/data --port 8080 --internal-port 9090 --node-id node2 --peers node1=breeze1:9090,node2=breeze2:9090,node3=breeze3:9090 --shards 6
+    command: start --path /root/data --port 8080 --internal-port 9090 --public-addr breeze2:8080 --node-id node2 --peers node1=breeze1:9090,node2=breeze2:9090,node3=breeze3:9090 --shards 6
     networks:
       - breeze-net
 
@@ -27,7 +27,7 @@ services:
       - "8083:8080"
     volumes:
       - breeze3-data:/root/data
-    command: start --path /root/data --port 8080 --internal-port 9090 --node-id node3 --peers node1=breeze1:9090,node2=breeze2:9090,node3=breeze3:9090 --shards 6
+    command: start --path /root/data --port 8080 --internal-port 9090 --public-addr breeze3:8080 --node-id node3 --peers node1=breeze1:9090,node2=breeze2:9090,node3=breeze3:9090 --shards 6
     networks:
       - breeze-net
 
