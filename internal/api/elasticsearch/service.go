@@ -1,6 +1,7 @@
 package elasticsearch
 
 import (
+	"breeze/internal/cluster"
 	"breeze/internal/shard"
 	"bufio"
 	"encoding/json"
@@ -13,11 +14,15 @@ import (
 )
 
 type Service struct {
-	manager *shard.Manager
+	manager    *shard.Manager
+	publicAddr string
 }
 
-func NewService(m *shard.Manager) *Service {
-	return &Service{manager: m}
+func NewService(m *shard.Manager, publicAddr string) *Service {
+	return &Service{
+		manager:    m,
+		publicAddr: publicAddr,
+	}
 }
 
 func (s *Service) RegisterHandlers(r *gin.Engine) {
@@ -295,12 +300,16 @@ func (s *Service) convertMapping(idx *shard.Index) map[string]interface{} {
 }
 
 func (s *Service) Health(c *gin.Context) {
+	numNodes := len(s.manager.Cluster.Nodes)
+	if numNodes == 0 {
+		numNodes = 1
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"cluster_name":                     "breeze-cluster",
 		"status":                           "green",
 		"timed_out":                        false,
-		"number_of_nodes":                  1,
-		"number_of_data_nodes":             1,
+		"number_of_nodes":                  numNodes,
+		"number_of_data_nodes":             numNodes,
 		"active_primary_shards":            1,
 		"active_shards":                    1,
 		"relocating_shards":                0,
@@ -315,57 +324,85 @@ func (s *Service) Health(c *gin.Context) {
 }
 
 func (s *Service) Nodes(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"nodes": gin.H{
-			"breeze-node-id": gin.H{
-				"name":    "breeze-node",
-				"version": "8.10.2",
-				"ip":      "127.0.0.1",
-				"roles":   []string{"master", "data", "ingest"},
-				"http": gin.H{
-					"publish_address": "127.0.0.1:8080",
-				},
+	nodes := make(map[string]interface{})
+	for _, n := range s.manager.Cluster.Nodes {
+		// Try to extract host from addr
+		host := n.Addr
+		if parts := strings.Split(n.Addr, ":"); len(parts) > 0 {
+			host = parts[0]
+		}
+		nodes[n.ID] = gin.H{
+			"name":    n.ID,
+			"version": "8.10.2",
+			"ip":      host,
+			"roles":   []string{"master", "data", "ingest"},
+			"http": gin.H{
+				"publish_address": n.Addr,
 			},
-		},
+		}
+	}
+
+	if len(nodes) == 0 {
+		nodes["breeze-node-id"] = gin.H{
+			"name":    "breeze-node",
+			"version": "8.10.2",
+			"ip":      s.publicAddr,
+			"roles":   []string{"master", "data", "ingest"},
+			"http": gin.H{
+				"publish_address": s.publicAddr,
+			},
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"nodes": nodes,
 	})
 }
 
 func (s *Service) NodeStats(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"cluster_name": "breeze-cluster",
-		"nodes": gin.H{
-			"breeze-node-id": gin.H{
-				"name": "breeze-node",
-				"jvm": gin.H{
-					"timestamp":        0,
-					"uptime_in_millis": 0,
-					"mem": gin.H{
-						"heap_used_in_bytes": 0,
-						"heap_max_in_bytes":  0,
-						"pools": gin.H{
-							"young":    gin.H{"used_in_bytes": 0, "max_in_bytes": 0, "peak_used_in_bytes": 0, "peak_max_in_bytes": 0},
-							"old":      gin.H{"used_in_bytes": 0, "max_in_bytes": 0, "peak_used_in_bytes": 0, "peak_max_in_bytes": 0},
-							"survivor": gin.H{"used_in_bytes": 0, "max_in_bytes": 0, "peak_used_in_bytes": 0, "peak_max_in_bytes": 0},
-						},
-					},
-					"gc": gin.H{
-						"collectors": gin.H{
-							"young": gin.H{"collection_count": 0, "collection_time_in_millis": 0},
-							"old":   gin.H{"collection_count": 0, "collection_time_in_millis": 0},
-						},
+	nodes := make(map[string]interface{})
+	clusterNodes := s.manager.Cluster.Nodes
+	if len(clusterNodes) == 0 {
+		clusterNodes = []cluster.Node{{ID: "breeze-node-id", Addr: s.publicAddr}}
+	}
+
+	for _, n := range clusterNodes {
+		nodes[n.ID] = gin.H{
+			"name": n.ID,
+			"jvm": gin.H{
+				"timestamp":        0,
+				"uptime_in_millis": 0,
+				"mem": gin.H{
+					"heap_used_in_bytes": 0,
+					"heap_max_in_bytes":  0,
+					"pools": gin.H{
+						"young":    gin.H{"used_in_bytes": 0, "max_in_bytes": 0, "peak_used_in_bytes": 0, "peak_max_in_bytes": 0},
+						"old":      gin.H{"used_in_bytes": 0, "max_in_bytes": 0, "peak_used_in_bytes": 0, "peak_max_in_bytes": 0},
+						"survivor": gin.H{"used_in_bytes": 0, "max_in_bytes": 0, "peak_used_in_bytes": 0, "peak_max_in_bytes": 0},
 					},
 				},
-				"ingest": gin.H{
-					"total": gin.H{
-						"count":          0,
-						"time_in_millis": 0,
-						"current":        0,
-						"failed":         0,
+				"gc": gin.H{
+					"collectors": gin.H{
+						"young": gin.H{"collection_count": 0, "collection_time_in_millis": 0},
+						"old":   gin.H{"collection_count": 0, "collection_time_in_millis": 0},
 					},
-					"pipelines": gin.H{},
 				},
 			},
-		},
+			"ingest": gin.H{
+				"total": gin.H{
+					"count":          0,
+					"time_in_millis": 0,
+					"current":        0,
+					"failed":         0,
+				},
+				"pipelines": gin.H{},
+			},
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"cluster_name": "breeze-cluster",
+		"nodes":        nodes,
 	})
 }
 
@@ -414,7 +451,6 @@ func (s *Service) Index(c *gin.Context) {
 	}
 
 	if c.Query("forward") == "false" {
-		// Only write locally
 		shardID := idx.GetShardID(id)
 		if s, ok := idx.Shards[shardID]; ok {
 			s.Index(id, data)
@@ -491,7 +527,6 @@ func (s *Service) Bulk(c *gin.Context) {
 		}
 
 		if c.Query("forward") == "false" {
-			// Write locally to shards we own
 			shardGroupsIds := make(map[int][]string)
 			shardGroupsData := make(map[int][]map[string]interface{})
 			for j, id := range b.ids {
@@ -702,7 +737,7 @@ func (s *Service) Search(c *gin.Context) {
 		queryStr = c.Query("q")
 	} else {
 		var req map[string]interface{}
-		if err := c.BindJSON(&req); err == nil {
+		if err := c.BindJSON(&req); err != nil {
 			if q, ok := req["query"].(map[string]interface{}); ok {
 				if m, ok := q["match_all"].(map[string]interface{}); ok && len(m) == 0 {
 					queryStr = "*"
