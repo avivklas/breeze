@@ -23,7 +23,7 @@ func TestBulk(t *testing.T) {
 	}
 	defer manager.Close()
 
-	service := NewService(manager)
+	service := NewService(manager, "localhost:8080")
 	gin.SetMode(gin.TestMode)
 	r := gin.Default()
 	r.POST("/_bulk", service.Bulk)
