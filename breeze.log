@@ -12,6 +12,7 @@ Cluster server listening on :9090
 [GIN-debug] GET    /_cluster/health          --> breeze/internal/api/elasticsearch.(*Service).Health-fm (4 handlers)
 [GIN-debug] GET    /_cluster/health/:index   --> breeze/internal/api/elasticsearch.(*Service).Health-fm (4 handlers)
 [GIN-debug] GET    /_cluster/settings        --> breeze/internal/api/elasticsearch.(*Service).ClusterSettings-fm (4 handlers)
+[GIN-debug] PUT    /_cluster/settings        --> breeze/internal/api/elasticsearch.(*Service).Acknowledged-fm (4 handlers)
 [GIN-debug] GET    /_nodes                   --> breeze/internal/api/elasticsearch.(*Service).Nodes-fm (4 handlers)
 [GIN-debug] GET    /_nodes/:nodeId           --> breeze/internal/api/elasticsearch.(*Service).Nodes-fm (4 handlers)
 [GIN-debug] GET    /_nodes/_local            --> breeze/internal/api/elasticsearch.(*Service).Nodes-fm (4 handlers)
@@ -28,14 +29,22 @@ Cluster server listening on :9090
 [GIN-debug] GET    /_template                --> breeze/internal/api/elasticsearch.(*Service).GetTemplate-fm (4 handlers)
 [GIN-debug] GET    /_template/:name          --> breeze/internal/api/elasticsearch.(*Service).GetTemplate-fm (4 handlers)
 [GIN-debug] PUT    /_template/:name          --> breeze/internal/api/elasticsearch.(*Service).PutTemplate-fm (4 handlers)
+[GIN-debug] POST   /_template/:name          --> breeze/internal/api/elasticsearch.(*Service).PutTemplate-fm (4 handlers)
 [GIN-debug] DELETE /_template/:name          --> breeze/internal/api/elasticsearch.(*Service).DeleteTemplate-fm (4 handlers)
 [GIN-debug] GET    /_index_template          --> breeze/internal/api/elasticsearch.(*Service).GetTemplate-fm (4 handlers)
 [GIN-debug] GET    /_index_template/:name    --> breeze/internal/api/elasticsearch.(*Service).GetTemplate-fm (4 handlers)
 [GIN-debug] PUT    /_index_template/:name    --> breeze/internal/api/elasticsearch.(*Service).PutTemplate-fm (4 handlers)
+[GIN-debug] POST   /_index_template/:name    --> breeze/internal/api/elasticsearch.(*Service).PutTemplate-fm (4 handlers)
 [GIN-debug] DELETE /_index_template/:name    --> breeze/internal/api/elasticsearch.(*Service).DeleteTemplate-fm (4 handlers)
+[GIN-debug] GET    /_component_template      --> breeze/internal/api/elasticsearch.(*Service).Acknowledged-fm (4 handlers)
+[GIN-debug] GET    /_component_template/:name --> breeze/internal/api/elasticsearch.(*Service).Acknowledged-fm (4 handlers)
+[GIN-debug] PUT    /_component_template/:name --> breeze/internal/api/elasticsearch.(*Service).Acknowledged-fm (4 handlers)
+[GIN-debug] POST   /_component_template/:name --> breeze/internal/api/elasticsearch.(*Service).Acknowledged-fm (4 handlers)
 [GIN-debug] PUT    /:index                   --> breeze/internal/api/elasticsearch.(*Service).CreateIndex-fm (4 handlers)
 [GIN-debug] GET    /:index                   --> breeze/internal/api/elasticsearch.(*Service).GetIndexInfo-fm (4 handlers)
 [GIN-debug] HEAD   /:index                   --> breeze/internal/api/elasticsearch.(*Service).HeadIndex-fm (4 handlers)
+[GIN-debug] PUT    /:index/_settings         --> breeze/internal/api/elasticsearch.(*Service).Acknowledged-fm (4 handlers)
+[GIN-debug] PUT    /_settings                --> breeze/internal/api/elasticsearch.(*Service).Acknowledged-fm (4 handlers)
 [GIN-debug] PUT    /:index/_doc/:id          --> breeze/internal/api/elasticsearch.(*Service).Index-fm (4 handlers)
 [GIN-debug] POST   /:index/_doc/:id          --> breeze/internal/api/elasticsearch.(*Service).Index-fm (4 handlers)
 [GIN-debug] PUT    /:index/_create/:id       --> breeze/internal/api/elasticsearch.(*Service).Index-fm (4 handlers)
@@ -51,12 +60,18 @@ Cluster server listening on :9090
 [GIN-debug] POST   /_mget                    --> breeze/internal/api/elasticsearch.(*Service).MGet-fm (4 handlers)
 [GIN-debug] POST   /:index/_mget             --> breeze/internal/api/elasticsearch.(*Service).MGet-fm (4 handlers)
 [GIN-debug] POST   /_msearch                 --> breeze/internal/api/elasticsearch.(*Service).MSearch-fm (4 handlers)
+[GIN-debug] GET    /_ingest/pipeline         --> breeze/internal/api/elasticsearch.(*Service).Acknowledged-fm (4 handlers)
+[GIN-debug] GET    /_ingest/pipeline/:id     --> breeze/internal/api/elasticsearch.(*Service).GetIngestPipeline-fm (4 handlers)
+[GIN-debug] PUT    /_ingest/pipeline/:id     --> breeze/internal/api/elasticsearch.(*Service).Acknowledged-fm (4 handlers)
+[GIN-debug] DELETE /_ingest/pipeline/:id     --> breeze/internal/api/elasticsearch.(*Service).Acknowledged-fm (4 handlers)
+[GIN-debug] PUT    /_ilm/policy/:name        --> breeze/internal/api/elasticsearch.(*Service).Acknowledged-fm (4 handlers)
+[GIN-debug] GET    /_ilm/policy/:name        --> breeze/internal/api/elasticsearch.(*Service).ILMPolicy-fm (4 handlers)
 [GIN-debug] POST   /_monitoring/bulk         --> breeze/internal/api/elasticsearch.(*Service).MonitoringBulk-fm (4 handlers)
 [GIN-debug] GET    /_metadata                --> main.runServer.func1 (4 handlers)
 Breeze server node1 starting on API port 8080, Cluster port 9090...
 [GIN-debug] [WARNING] You trusted all proxies, this is NOT safe. We recommend you to set a value.
 Please check https://github.com/gin-gonic/gin/blob/master/docs/doc.md#dont-trust-all-proxies for details.
 [GIN-debug] Listening and serving HTTP on :8080
-[GIN] 2026/02/12 - 12:58:09 | 200 |   28.302912ms |             ::1 | PUT      "/mappingtest"
-[GIN] 2026/02/12 - 12:58:09 | 200 |      277.77µs |             ::1 | PUT      "/mappingtest/_mapping"
-[GIN] 2026/02/12 - 12:58:09 | 200 |      60.918µs |             ::1 | GET      "/mappingtest/_mapping"
+[GIN] 2026/02/12 - 19:44:40 | 200 |   54.288897ms |             ::1 | POST     "/testindex/_doc/1"
+[GIN] 2026/02/12 - 19:44:40 | 200 |     558.993µs |             ::1 | GET      "/testindex/_doc/1"
+[GIN] 2026/02/12 - 19:44:40 | 200 |     223.781µs |             ::1 | GET      "/testindex/_search"

@@ -39,12 +39,17 @@ func (s *Service) RegisterHandlers(r *gin.Engine) {
 	r.GET("/_cluster/health/:index", s.Health)
 	r.GET("/_cluster/settings", s.ClusterSettings)
 	r.PUT("/_cluster/settings", s.Acknowledged)
+	r.GET("/_cluster/state", s.ClusterState)
+	r.GET("/_cluster/state/:metric", s.ClusterState)
+	r.GET("/_cluster/state/:metric/:index", s.ClusterState)
 	r.GET("/_nodes", s.Nodes)
 	r.GET("/_nodes/:nodeId", s.Nodes)
 	r.GET("/_nodes/_local", s.Nodes)
 	r.GET("/_nodes/:nodeId/:metric", s.Nodes)
 	r.GET("/_nodes/stats", s.NodeStats)
 	r.GET("/_nodes/stats/*metric", s.NodeStats)
+	r.GET("/_nodes/usage", s.NodesUsage)
+	r.GET("/_nodes/:nodeId/usage", s.NodesUsage)
 	r.GET("/_license", s.License)
 	r.GET("/_xpack", s.XPack)
 	r.GET("/_cat/indices", s.CatIndices)
@@ -89,6 +94,11 @@ func (s *Service) RegisterHandlers(r *gin.Engine) {
 	r.POST("/_mget", s.MGet)
 	r.POST("/:index/_mget", s.MGet)
 	r.POST("/_msearch", s.MSearch)
+
+	r.GET("/_ingest/pipeline", s.Acknowledged)
+	r.GET("/_ingest/pipeline/:id", s.GetIngestPipeline)
+	r.PUT("/_ingest/pipeline/:id", s.Acknowledged)
+	r.DELETE("/_ingest/pipeline/:id", s.Acknowledged)
 
 	r.PUT("/_ilm/policy/:name", s.Acknowledged)
 	r.GET("/_ilm/policy/:name", s.ILMPolicy)
@@ -165,6 +175,20 @@ func (s *Service) ILMPolicy(c *gin.Context) {
 					},
 				},
 			},
+		},
+	})
+}
+
+func (s *Service) GetIngestPipeline(c *gin.Context) {
+	id := c.Param("id")
+	if id == "" {
+		c.JSON(http.StatusOK, gin.H{})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		id: gin.H{
+			"description": "stub pipeline",
+			"processors":  []interface{}{},
 		},
 	})
 }
@@ -508,6 +532,46 @@ func (s *Service) Nodes(c *gin.Context) {
 	})
 }
 
+func (s *Service) ClusterState(c *gin.Context) {
+	indices := s.manager.ListIndices()
+	indexMap := make(map[string]interface{})
+	for _, name := range indices {
+		indexMap[name] = gin.H{
+			"state": "open",
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"cluster_name": "breeze-cluster",
+		"cluster_uuid": "breeze-cluster-uuid",
+		"master_node":  s.manager.Cluster.SelfID,
+		"nodes":        gin.H{}, // simplified
+		"metadata": gin.H{
+			"cluster_uuid": "breeze-cluster-uuid",
+			"indices":      indexMap,
+		},
+	})
+}
+
+func (s *Service) NodesUsage(c *gin.Context) {
+	nodes := make(map[string]interface{})
+	clusterNodes := s.manager.Cluster.Nodes
+	if len(clusterNodes) == 0 {
+		clusterNodes = []cluster.Node{{ID: s.manager.Cluster.SelfID, Addr: s.publicAddr}}
+	}
+	for _, n := range clusterNodes {
+		nodes[n.ID] = gin.H{
+			"since": 0,
+			"rest_actions": gin.H{
+				"nodes_usage_action": 1,
+			},
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"cluster_name": "breeze-cluster",
+		"nodes":        nodes,
+	})
+}
+
 func (s *Service) NodeStats(c *gin.Context) {
 	nodes := make(map[string]interface{})
 	clusterNodes := s.manager.Cluster.Nodes
@@ -658,10 +722,12 @@ func (s *Service) Index(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"_index":   name,
-		"_id":      id,
-		"result":   "created",
-		"_version": 1,
+		"_index":        name,
+		"_id":           id,
+		"result":        "created",
+		"_version":      1,
+		"_seq_no":       0,
+		"_primary_term": 1,
 	})
 }
 
@@ -732,10 +798,12 @@ func (s *Service) Update(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"_index":   name,
-		"_id":      id,
-		"result":   "updated",
-		"_version": 1,
+		"_index":        name,
+		"_id":           id,
+		"result":        "updated",
+		"_version":      1,
+		"_seq_no":       0,
+		"_primary_term": 1,
 	})
 }
 
@@ -804,7 +872,14 @@ func (s *Service) Bulk(c *gin.Context) {
 					}
 				}
 
-				resp := gin.H{"_index": indexName, "_id": id, "status": status}
+				resp := gin.H{
+					"_index":        indexName,
+					"_id":           id,
+					"status":        status,
+					"_version":      1,
+					"_seq_no":       0,
+					"_primary_term": 1,
+				}
 				if errResp != nil {
 					resp["error"] = errResp
 				}
@@ -885,7 +960,15 @@ func (s *Service) MGet(c *gin.Context) {
 			}
 			doc, _ := idx.Get(id)
 			if doc != nil {
-				results = append(results, gin.H{"_index": indexName, "_id": id, "found": true, "_source": doc})
+				results = append(results, gin.H{
+					"_index":        indexName,
+					"_id":           id,
+					"found":         true,
+					"_version":      1,
+					"_seq_no":       0,
+					"_primary_term": 1,
+					"_source":       doc,
+				})
 			} else {
 				results = append(results, gin.H{"_index": indexName, "_id": id, "found": false})
 			}
@@ -903,7 +986,15 @@ func (s *Service) MGet(c *gin.Context) {
 			}
 			doc, _ := idx.Get(d.ID)
 			if doc != nil {
-				results = append(results, gin.H{"_index": n, "_id": d.ID, "found": true, "_source": doc})
+				results = append(results, gin.H{
+					"_index":        n,
+					"_id":           d.ID,
+					"found":         true,
+					"_version":      1,
+					"_seq_no":       0,
+					"_primary_term": 1,
+					"_source":       doc,
+				})
 			} else {
 				results = append(results, gin.H{"_index": n, "_id": d.ID, "found": false})
 			}
@@ -968,10 +1059,13 @@ func (s *Service) MSearch(c *gin.Context) {
 					json.Unmarshal([]byte(s), &source)
 				}
 				hits = append(hits, gin.H{
-					"_index":  indexName,
-					"_id":     hit.ID,
-					"_score":  hit.Score,
-					"_source": source,
+					"_index":        indexName,
+					"_id":           hit.ID,
+					"_score":        hit.Score,
+					"_version":      1,
+					"_seq_no":       0,
+					"_primary_term": 1,
+					"_source":       source,
 				})
 			}
 		}
@@ -1098,10 +1192,13 @@ func (s *Service) Get(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"_index":  name,
-		"_id":     id,
-		"found":   true,
-		"_source": doc,
+		"_index":        name,
+		"_id":           id,
+		"found":         true,
+		"_version":      1,
+		"_seq_no":       0,
+		"_primary_term": 1,
+		"_source":       doc,
 	})
 }
 
@@ -1185,10 +1282,13 @@ func (s *Service) Search(c *gin.Context) {
 				json.Unmarshal([]byte(s), &source)
 			}
 			hits = append(hits, gin.H{
-				"_index":  name,
-				"_id":     hit.ID,
-				"_score":  hit.Score,
-				"_source": source,
+				"_index":        name,
+				"_id":           hit.ID,
+				"_score":        hit.Score,
+				"_version":      1,
+				"_seq_no":       0,
+				"_primary_term": 1,
+				"_source":       source,
 			})
 		}
 	}
