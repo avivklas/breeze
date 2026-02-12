@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/blevesearch/bleve/v2"
@@ -33,14 +34,16 @@ func (s *Service) RegisterHandlers(r *gin.Engine) {
 	})
 
 	r.GET("/", s.Info)
+	r.HEAD("/", s.Info)
 	r.GET("/_cluster/health", s.Health)
 	r.GET("/_cluster/health/:index", s.Health)
 	r.GET("/_cluster/settings", s.ClusterSettings)
 	r.GET("/_nodes", s.Nodes)
 	r.GET("/_nodes/:nodeId", s.Nodes)
+	r.GET("/_nodes/_local", s.Nodes)
 	r.GET("/_nodes/:nodeId/:metric", s.Nodes)
 	r.GET("/_nodes/stats", s.NodeStats)
-	r.GET("/_nodes/stats/:metric", s.NodeStats)
+	r.GET("/_nodes/stats/*metric", s.NodeStats)
 	r.GET("/_license", s.License)
 	r.GET("/_xpack", s.XPack)
 	r.GET("/_cat/indices", s.CatIndices)
@@ -231,6 +234,7 @@ func (s *Service) ClusterSettings(c *gin.Context) {
 
 func (s *Service) CatIndices(c *gin.Context) {
 	indices := s.manager.ListIndices()
+	sort.Strings(indices)
 	var sb strings.Builder
 	for _, name := range indices {
 		sb.WriteString(fmt.Sprintf("green open %s uuid 1 0 0 0 0b 0b\n", name))
@@ -383,6 +387,14 @@ func (s *Service) Nodes(c *gin.Context) {
 	nodeIdParam := c.Param("nodeId")
 	metricParam := c.Param("metric")
 
+	// Handle /_nodes/settings which some clients use
+	if nodeIdParam == "settings" {
+		nodeIdParam = ""
+	}
+	if strings.Contains(c.Request.URL.Path, "/_local") {
+		nodeIdParam = s.manager.Cluster.SelfID
+	}
+
 	nodes := make(map[string]interface{})
 	clusterNodes := s.manager.Cluster.Nodes
 	if len(clusterNodes) == 0 {
@@ -442,12 +454,17 @@ func (s *Service) NodeStats(c *gin.Context) {
 	nodes := make(map[string]interface{})
 	clusterNodes := s.manager.Cluster.Nodes
 	if len(clusterNodes) == 0 {
-		clusterNodes = []cluster.Node{{ID: "breeze-node-id", Addr: s.publicAddr}}
+		clusterNodes = []cluster.Node{{ID: s.manager.Cluster.SelfID, Addr: s.publicAddr}}
 	}
 
 	for _, n := range clusterNodes {
 		nodes[n.ID] = gin.H{
-			"name": n.ID,
+			"name":             n.ID,
+			"timestamp":        0,
+			"transport_address": n.Addr,
+			"host":             n.ID,
+			"ip":               n.Addr,
+			"roles":            []string{"master", "data", "ingest"},
 			"jvm": gin.H{
 				"timestamp":        0,
 				"uptime_in_millis": 0,
@@ -476,6 +493,18 @@ func (s *Service) NodeStats(c *gin.Context) {
 				},
 				"pipelines": gin.H{},
 			},
+			"os": gin.H{
+				"timestamp": 0,
+				"cpu":       gin.H{"percent": 0, "load_average": gin.H{"1m": 0, "5m": 0, "15m": 0}},
+				"mem":       gin.H{"total_in_bytes": 0, "free_in_bytes": 0, "used_in_bytes": 0, "free_percent": 0, "used_percent": 0},
+			},
+			"process": gin.H{
+				"timestamp": 0,
+				"open_file_descriptors": 0,
+				"max_file_descriptors":  0,
+				"cpu": gin.H{"percent": 0, "total_in_millis": 0},
+				"mem": gin.H{"total_virtual_in_bytes": 0},
+			},
 		}
 	}
 
@@ -484,6 +513,7 @@ func (s *Service) NodeStats(c *gin.Context) {
 		"nodes":        nodes,
 	})
 }
+
 
 func (s *Service) CreateIndex(c *gin.Context) {
 	name := c.Param("index")
@@ -523,10 +553,35 @@ func (s *Service) Index(c *gin.Context) {
 		return
 	}
 
+	opType := c.Query("op_type")
+	isCreate := strings.Contains(c.Request.URL.Path, "/_create/") || opType == "create"
+
 	idx, err := s.getOrCreateIndex(name)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+
+	if isCreate {
+		existing, _ := idx.Get(id)
+		if existing != nil {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": gin.H{
+					"root_cause": []gin.H{{
+						"type":   "version_conflict_engine_exception",
+						"reason": "document already exists",
+						"index":  name,
+						"id":     id,
+					}},
+					"type":   "version_conflict_engine_exception",
+					"reason": "document already exists",
+					"index":  name,
+					"id":     id,
+				},
+				"status": 409,
+			})
+			return
+		}
 	}
 
 	if c.Query("forward") == "false" {
@@ -668,12 +723,34 @@ func (s *Service) Bulk(c *gin.Context) {
 			if scanner.Scan() {
 				var doc map[string]interface{}
 				json.Unmarshal(scanner.Bytes(), &doc)
-				err := idx.Index(id, doc)
+
 				status := 201
-				if err != nil {
-					status = 500
+				var errResp gin.H
+				if op == "create" {
+					existing, _ := idx.Get(id)
+					if existing != nil {
+						status = 409
+						errResp = gin.H{
+							"type":   "version_conflict_engine_exception",
+							"reason": "document already exists",
+							"index":  indexName,
+							"id":     id,
+						}
+					}
 				}
-				responseItems = append(responseItems, gin.H{op: gin.H{"_index": indexName, "_id": id, "status": status}})
+
+				if status == 201 {
+					err := idx.Index(id, doc)
+					if err != nil {
+						status = 500
+					}
+				}
+
+				resp := gin.H{"_index": indexName, "_id": id, "status": status}
+				if errResp != nil {
+					resp["error"] = errResp
+				}
+				responseItems = append(responseItems, gin.H{op: resp})
 			}
 		case "delete":
 			err := idx.Delete(id)
@@ -745,7 +822,7 @@ func (s *Service) MGet(c *gin.Context) {
 		idx := s.manager.GetIndex(indexName)
 		for _, id := range req.IDs {
 			if idx == nil {
-				results = append(results, gin.H{"found": false})
+				results = append(results, gin.H{"_index": indexName, "_id": id, "found": false})
 				continue
 			}
 			doc, _ := idx.Get(id)
@@ -763,7 +840,7 @@ func (s *Service) MGet(c *gin.Context) {
 			}
 			idx := s.manager.GetIndex(n)
 			if idx == nil {
-				results = append(results, gin.H{"found": false})
+				results = append(results, gin.H{"_index": n, "_id": d.ID, "found": false})
 				continue
 			}
 			doc, _ := idx.Get(d.ID)
@@ -924,7 +1001,11 @@ func (s *Service) Get(c *gin.Context) {
 
 	idx := s.manager.GetIndex(name)
 	if idx == nil {
-		c.JSON(http.StatusNotFound, gin.H{"found": false})
+		c.JSON(http.StatusNotFound, gin.H{
+			"_index": name,
+			"_id":    id,
+			"found":  false,
+		})
 		return
 	}
 
@@ -935,7 +1016,11 @@ func (s *Service) Get(c *gin.Context) {
 	}
 
 	if doc == nil {
-		c.JSON(http.StatusNotFound, gin.H{"found": false})
+		c.JSON(http.StatusNotFound, gin.H{
+			"_index": name,
+			"_id":    id,
+			"found":  false,
+		})
 		return
 	}
 

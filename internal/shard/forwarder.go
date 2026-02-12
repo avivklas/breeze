@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/blevesearch/bleve/v2"
 )
@@ -38,56 +39,70 @@ type InternalResponse struct {
 	Err          string                 `json:"err,omitempty"`
 }
 
+type nodeConn struct {
+	conn    net.Conn
+	encoder *json.Encoder
+	decoder *json.Decoder
+	mu      sync.Mutex
+}
+
 type Forwarder struct {
 	mu    sync.Mutex
-	conns map[string]net.Conn
+	conns map[string]*nodeConn
 }
 
 func NewForwarder() *Forwarder {
 	return &Forwarder{
-		conns: make(map[string]net.Conn),
+		conns: make(map[string]*nodeConn),
 	}
 }
 
-func (f *Forwarder) getConn(node cluster.Node) (net.Conn, error) {
+func (f *Forwarder) getConn(node cluster.Node) (*nodeConn, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if conn, ok := f.conns[node.ID]; ok {
-		return conn, nil
+	if nc, ok := f.conns[node.ID]; ok {
+		return nc, nil
 	}
 
 	conn, err := net.Dial("tcp", node.Addr)
 	if err != nil {
 		return nil, err
 	}
-	f.conns[node.ID] = conn
-	return conn, nil
+	nc := &nodeConn{
+		conn:    conn,
+		encoder: json.NewEncoder(conn),
+		decoder: json.NewDecoder(conn),
+	}
+	f.conns[node.ID] = nc
+	return nc, nil
 }
 
 func (f *Forwarder) call(node cluster.Node, req InternalRequest) (*InternalResponse, error) {
-	conn, err := f.getConn(node)
+	nc, err := f.getConn(node)
 	if err != nil {
 		return nil, err
 	}
 
-	encoder := json.NewEncoder(conn)
-	decoder := json.NewDecoder(conn)
+	nc.mu.Lock()
+	defer nc.mu.Unlock()
 
-	if err := encoder.Encode(req); err != nil {
+	nc.conn.SetDeadline(time.Now().Add(30 * time.Second))
+
+	if err := nc.encoder.Encode(req); err != nil {
 		f.mu.Lock()
 		delete(f.conns, node.ID)
 		f.mu.Unlock()
-		conn.Close()
+		nc.conn.Close()
 		return nil, err
 	}
 
 	var resp InternalResponse
-	if err := decoder.Decode(&resp); err != nil {
+	if err := nc.decoder.Decode(&resp); err != nil {
 		f.mu.Lock()
 		delete(f.conns, node.ID)
 		f.mu.Unlock()
-		conn.Close()
+		nc.conn.Close()
 		return nil, err
 	}
 
