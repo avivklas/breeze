@@ -28,8 +28,14 @@ type Index struct {
 
 type IndexTemplate struct {
 	IndexPatterns []string               `json:"index_patterns"`
-	Settings      map[string]interface{} `json:"settings"`
-	Mappings      map[string]interface{} `json:"mappings"`
+	Settings      map[string]interface{} `json:"settings,omitempty"`
+	Mappings      map[string]interface{} `json:"mappings,omitempty"`
+	Template      *struct {
+		Settings map[string]interface{} `json:"settings,omitempty"`
+		Mappings map[string]interface{} `json:"mappings,omitempty"`
+	} `json:"template,omitempty"`
+	Priority int `json:"priority,omitempty"`
+	Order    int `json:"order,omitempty"`
 }
 
 type Manager struct {
@@ -194,14 +200,17 @@ func (m *Manager) CreateIndex(name string, numShards int, forward bool) (*Index,
 	}
 	m.mu.RUnlock()
 
-	if numShards <= 0 {
-		if appliedTemplate != nil {
-			if s, ok := appliedTemplate.Settings["number_of_shards"].(float64); ok {
-				numShards = int(s)
-			} else if s, ok := appliedTemplate.Settings["index"].(map[string]interface{}); ok {
-				if ns, ok := s["number_of_shards"].(float64); ok {
-					numShards = int(ns)
-				}
+	if numShards <= 0 && appliedTemplate != nil {
+		settings := appliedTemplate.Settings
+		if appliedTemplate.Template != nil && appliedTemplate.Template.Settings != nil {
+			settings = appliedTemplate.Template.Settings
+		}
+
+		if s, ok := settings["number_of_shards"].(float64); ok {
+			numShards = int(s)
+		} else if s, ok := settings["index"].(map[string]interface{}); ok {
+			if ns, ok := s["number_of_shards"].(float64); ok {
+				numShards = int(ns)
 			}
 		}
 	}
@@ -220,8 +229,13 @@ func (m *Manager) CreateIndex(name string, numShards int, forward bool) (*Index,
 		return nil, err
 	}
 
-	if appliedTemplate != nil && appliedTemplate.Mappings != nil {
-		if props, ok := appliedTemplate.Mappings["properties"].(map[string]interface{}); ok {
+	if appliedTemplate != nil {
+		mappings := appliedTemplate.Mappings
+		if appliedTemplate.Template != nil && appliedTemplate.Template.Mappings != nil {
+			mappings = appliedTemplate.Template.Mappings
+		}
+
+		if props, ok := mappings["properties"].(map[string]interface{}); ok {
 			for k, v := range props {
 				if vm, ok := v.(map[string]interface{}); ok {
 					tStr, _ := vm["type"].(string)
@@ -280,6 +294,36 @@ func (idx *Index) saveMapping() {
 	data, _ := json.Marshal(idx.Mapping.Fields)
 	idx.Mapping.Mu.RUnlock()
 	os.WriteFile(mappingPath, data, 0644)
+}
+
+func (idx *Index) saveMappingLocked() {
+	mappingPath := filepath.Join(idx.path, "mapping.json")
+	data, _ := json.Marshal(idx.Mapping.Fields)
+	os.WriteFile(mappingPath, data, 0644)
+}
+
+func (idx *Index) UpdateMapping(props map[string]interface{}) {
+	idx.Mapping.Mu.Lock()
+	defer idx.Mapping.Mu.Unlock()
+
+	for k, v := range props {
+		if vm, ok := v.(map[string]interface{}); ok {
+			tStr, _ := vm["type"].(string)
+			var detected bmapping.FieldType
+			switch tStr {
+			case "text", "keyword":
+				detected = bmapping.TypeString
+			case "double", "float", "integer", "long":
+				detected = bmapping.TypeNumber
+			case "boolean":
+				detected = bmapping.TypeBoolean
+			default:
+				detected = bmapping.TypeObject
+			}
+			idx.Mapping.Fields[k] = detected
+		}
+	}
+	idx.saveMappingLocked()
 }
 
 func (idx *Index) GetShardID(id string) int {

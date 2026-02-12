@@ -38,6 +38,7 @@ func (s *Service) RegisterHandlers(r *gin.Engine) {
 	r.GET("/_cluster/health", s.Health)
 	r.GET("/_cluster/health/:index", s.Health)
 	r.GET("/_cluster/settings", s.ClusterSettings)
+	r.PUT("/_cluster/settings", s.Acknowledged)
 	r.GET("/_nodes", s.Nodes)
 	r.GET("/_nodes/:nodeId", s.Nodes)
 	r.GET("/_nodes/_local", s.Nodes)
@@ -49,18 +50,29 @@ func (s *Service) RegisterHandlers(r *gin.Engine) {
 	r.GET("/_cat/indices", s.CatIndices)
 	r.GET("/_mapping", s.Mapping)
 	r.GET("/:index/_mapping", s.Mapping)
+	r.PUT("/:index/_mapping", s.PutMapping)
+	r.POST("/:index/_mapping", s.PutMapping)
 	r.GET("/_template", s.GetTemplate)
 	r.GET("/_template/:name", s.GetTemplate)
 	r.PUT("/_template/:name", s.PutTemplate)
+	r.POST("/_template/:name", s.PutTemplate)
 	r.DELETE("/_template/:name", s.DeleteTemplate)
 	r.GET("/_index_template", s.GetTemplate)
 	r.GET("/_index_template/:name", s.GetTemplate)
 	r.PUT("/_index_template/:name", s.PutTemplate)
+	r.POST("/_index_template/:name", s.PutTemplate)
 	r.DELETE("/_index_template/:name", s.DeleteTemplate)
+
+	r.GET("/_component_template", s.Acknowledged)
+	r.GET("/_component_template/:name", s.Acknowledged)
+	r.PUT("/_component_template/:name", s.Acknowledged)
+	r.POST("/_component_template/:name", s.Acknowledged)
 
 	r.PUT("/:index", s.CreateIndex)
 	r.GET("/:index", s.GetIndexInfo)
 	r.HEAD("/:index", s.HeadIndex)
+	r.PUT("/:index/_settings", s.Acknowledged)
+	r.PUT("/_settings", s.Acknowledged)
 	r.PUT("/:index/_doc/:id", s.Index)
 	r.POST("/:index/_doc/:id", s.Index)
 	r.PUT("/:index/_create/:id", s.Index)
@@ -77,6 +89,9 @@ func (s *Service) RegisterHandlers(r *gin.Engine) {
 	r.POST("/_mget", s.MGet)
 	r.POST("/:index/_mget", s.MGet)
 	r.POST("/_msearch", s.MSearch)
+
+	r.PUT("/_ilm/policy/:name", s.Acknowledged)
+	r.GET("/_ilm/policy/:name", s.ILMPolicy)
 
 	r.POST("/_monitoring/bulk", s.MonitoringBulk)
 }
@@ -114,8 +129,8 @@ func (s *Service) GetTemplate(c *gin.Context) {
 	// For _index_template ES returns a slightly different format
 	if strings.Contains(c.Request.URL.Path, "_index_template") {
 		c.JSON(http.StatusOK, gin.H{
-			"index_templates": []gin.H{
-				{
+			"index_templates": []interface{}{
+				gin.H{
 					"name":           name,
 					"index_template": t,
 				},
@@ -129,6 +144,29 @@ func (s *Service) GetTemplate(c *gin.Context) {
 func (s *Service) DeleteTemplate(c *gin.Context) {
 	// Not implemented in manager yet, but acknowledged to satisfy Kibana
 	c.JSON(http.StatusOK, gin.H{"acknowledged": true})
+}
+
+func (s *Service) Acknowledged(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"acknowledged": true})
+}
+
+func (s *Service) ILMPolicy(c *gin.Context) {
+	name := c.Param("name")
+	c.JSON(http.StatusOK, gin.H{
+		name: gin.H{
+			"version":   1,
+			"modified_date": 0,
+			"policy": gin.H{
+				"phases": gin.H{
+					"hot": gin.H{
+						"actions": gin.H{
+							"rollover": gin.H{"max_age": "30d", "max_size": "50gb"},
+						},
+					},
+				},
+			},
+		},
+	})
 }
 
 func (s *Service) MonitoringBulk(c *gin.Context) {
@@ -303,6 +341,26 @@ func (s *Service) GetIndexInfo(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, result)
+}
+
+func (s *Service) PutMapping(c *gin.Context) {
+	name := c.Param("index")
+	var req struct {
+		Properties map[string]interface{} `json:"properties"`
+	}
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	idx := s.manager.GetIndex(name)
+	if idx == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "index not found"})
+		return
+	}
+
+	idx.UpdateMapping(req.Properties)
+	c.JSON(http.StatusOK, gin.H{"acknowledged": true})
 }
 
 func (s *Service) Mapping(c *gin.Context) {
@@ -880,11 +938,19 @@ func (s *Service) MSearch(c *gin.Context) {
 		idx := s.manager.GetIndex(indexName)
 		if idx == nil {
 			responses = append(responses, gin.H{
-				"took": 0,
+				"took":      0,
+				"timed_out": false,
+				"_shards": gin.H{
+					"total":      1,
+					"successful": 1,
+					"skipped":    0,
+					"failed":     0,
+				},
 				"hits": gin.H{
 					"total": gin.H{"value": 0, "relation": "eq"},
 					"hits":  []interface{}{},
 				},
+				"aggregations": gin.H{},
 			})
 			continue
 		}
@@ -911,7 +977,14 @@ func (s *Service) MSearch(c *gin.Context) {
 		}
 
 		responses = append(responses, gin.H{
-			"took": 0,
+			"took":      0,
+			"timed_out": false,
+			"_shards": gin.H{
+				"total":      1,
+				"successful": 1,
+				"skipped":    0,
+				"failed":     0,
+			},
 			"hits": gin.H{
 				"total": gin.H{"value": total, "relation": "eq"},
 				"hits":  hits,
@@ -1121,7 +1194,14 @@ func (s *Service) Search(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"took": res.Took.Milliseconds(),
+		"took":      res.Took.Milliseconds(),
+		"timed_out": false,
+		"_shards": gin.H{
+			"total":      1,
+			"successful": 1,
+			"skipped":    0,
+			"failed":     0,
+		},
 		"hits": gin.H{
 			"total": gin.H{
 				"value":    total,
