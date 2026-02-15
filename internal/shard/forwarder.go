@@ -79,32 +79,61 @@ func (f *Forwarder) getConn(node cluster.Node) (*nodeConn, error) {
 }
 
 func (f *Forwarder) call(node cluster.Node, req InternalRequest) (*InternalResponse, error) {
+	return f.callWithRetry(node, req, true)
+}
+
+func (f *Forwarder) callWithRetry(node cluster.Node, req InternalRequest, allowRetry bool) (*InternalResponse, error) {
 	nc, err := f.getConn(node)
 	if err != nil {
 		return nil, err
 	}
 
 	nc.mu.Lock()
-	defer nc.mu.Unlock()
+	// Check if this connection was closed while we were waiting for the lock
+	f.mu.Lock()
+	currentNC, exists := f.conns[node.ID]
+	f.mu.Unlock()
+
+	if !exists || currentNC != nc {
+		nc.mu.Unlock()
+		if allowRetry {
+			return f.callWithRetry(node, req, false)
+		}
+		return nil, fmt.Errorf("connection closed")
+	}
 
 	nc.conn.SetDeadline(time.Now().Add(30 * time.Second))
 
 	if err := nc.encoder.Encode(req); err != nil {
 		f.mu.Lock()
-		delete(f.conns, node.ID)
+		if f.conns[node.ID] == nc {
+			delete(f.conns, node.ID)
+			nc.conn.Close()
+		}
 		f.mu.Unlock()
-		nc.conn.Close()
+		nc.mu.Unlock()
+		if allowRetry {
+			return f.callWithRetry(node, req, false)
+		}
 		return nil, err
 	}
 
 	var resp InternalResponse
 	if err := nc.decoder.Decode(&resp); err != nil {
 		f.mu.Lock()
-		delete(f.conns, node.ID)
+		if f.conns[node.ID] == nc {
+			delete(f.conns, node.ID)
+			nc.conn.Close()
+		}
 		f.mu.Unlock()
-		nc.conn.Close()
+		nc.mu.Unlock()
+		if allowRetry {
+			return f.callWithRetry(node, req, false)
+		}
 		return nil, err
 	}
+
+	nc.mu.Unlock()
 
 	if resp.Err != "" {
 		return nil, fmt.Errorf("%s", resp.Err)

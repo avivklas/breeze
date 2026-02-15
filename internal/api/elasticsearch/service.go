@@ -110,12 +110,12 @@ func (s *Service) PutTemplate(c *gin.Context) {
 	name := c.Param("name")
 	var t shard.IndexTemplate
 	if err := c.BindJSON(&t); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		s.errorResponse(c, http.StatusBadRequest, "illegal_argument_exception", err.Error())
 		return
 	}
 
 	if err := s.manager.PutTemplate(name, t); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		s.errorResponse(c, http.StatusInternalServerError, "internal_server_error", err.Error())
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"acknowledged": true})
@@ -132,7 +132,7 @@ func (s *Service) GetTemplate(c *gin.Context) {
 
 	t, ok := s.manager.GetTemplate(name)
 	if !ok {
-		c.JSON(http.StatusNotFound, gin.H{"error": "template not found"})
+		s.errorResponse(c, http.StatusNotFound, "index_template_missing_exception", "index template ["+name+"] missing")
 		return
 	}
 
@@ -190,6 +190,20 @@ func (s *Service) GetIngestPipeline(c *gin.Context) {
 			"description": "stub pipeline",
 			"processors":  []interface{}{},
 		},
+	})
+}
+
+func (s *Service) errorResponse(c *gin.Context, code int, errType string, reason string) {
+	c.JSON(code, gin.H{
+		"error": gin.H{
+			"root_cause": []gin.H{{
+				"type":   errType,
+				"reason": reason,
+			}},
+			"type":   errType,
+			"reason": reason,
+		},
+		"status": code,
 	})
 }
 
@@ -373,13 +387,13 @@ func (s *Service) PutMapping(c *gin.Context) {
 		Properties map[string]interface{} `json:"properties"`
 	}
 	if err := c.BindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		s.errorResponse(c, http.StatusBadRequest, "illegal_argument_exception", err.Error())
 		return
 	}
 
 	idx := s.manager.GetIndex(name)
 	if idx == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "index not found"})
+		s.errorResponse(c, http.StatusNotFound, "index_not_found_exception", "no such index ["+name+"]")
 		return
 	}
 
@@ -413,7 +427,7 @@ func (s *Service) Mapping(c *gin.Context) {
 	}
 
 	if len(result) == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "index not found"})
+		s.errorResponse(c, http.StatusNotFound, "index_not_found_exception", "no such index ["+name+"]")
 		return
 	}
 
@@ -646,21 +660,7 @@ func (s *Service) CreateIndex(c *gin.Context) {
 	_, err := s.manager.CreateIndex(name, shards, forward)
 
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": gin.H{
-				"root_cause": []gin.H{
-					{
-						"type":   "resource_already_exists_exception",
-						"reason": "index already exists",
-						"index":  name,
-					},
-				},
-				"type":   "resource_already_exists_exception",
-				"reason": "index already exists",
-				"index":  name,
-			},
-			"status": 400,
-		})
+		s.errorResponse(c, http.StatusBadRequest, "resource_already_exists_exception", "index ["+name+"] already exists")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"acknowledged": true, "shards_acknowledged": true, "index": name})
@@ -671,7 +671,7 @@ func (s *Service) Index(c *gin.Context) {
 	id := c.Param("id")
 	var data map[string]interface{}
 	if err := c.BindJSON(&data); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		s.errorResponse(c, http.StatusBadRequest, "illegal_argument_exception", err.Error())
 		return
 	}
 
@@ -680,43 +680,29 @@ func (s *Service) Index(c *gin.Context) {
 
 	idx, err := s.getOrCreateIndex(name)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		s.errorResponse(c, http.StatusInternalServerError, "internal_server_error", err.Error())
 		return
 	}
 
 	if isCreate {
 		existing, _ := idx.Get(id)
 		if existing != nil {
-			c.JSON(http.StatusConflict, gin.H{
-				"error": gin.H{
-					"root_cause": []gin.H{{
-						"type":   "version_conflict_engine_exception",
-						"reason": "document already exists",
-						"index":  name,
-						"id":     id,
-					}},
-					"type":   "version_conflict_engine_exception",
-					"reason": "document already exists",
-					"index":  name,
-					"id":     id,
-				},
-				"status": 409,
-			})
+			s.errorResponse(c, http.StatusConflict, "version_conflict_engine_exception", "[_doc]["+id+"]: version conflict, document already exists (current version [1])")
 			return
 		}
 	}
 
 	if c.Query("forward") == "false" {
 		shardID := idx.GetShardID(id)
-		if s, ok := idx.Shards[shardID]; ok {
-			s.Index(id, data)
+		if st, ok := idx.Shards[shardID]; ok {
+			st.Index(id, data)
 		} else {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "shard not local"})
+			s.errorResponse(c, http.StatusBadRequest, "shard_not_local_exception", "shard not local")
 			return
 		}
 	} else {
 		if err := idx.Index(id, data); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			s.errorResponse(c, http.StatusInternalServerError, "internal_server_error", err.Error())
 			return
 		}
 	}
@@ -744,19 +730,19 @@ func (s *Service) Update(c *gin.Context) {
 	}
 
 	if err := c.BindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		s.errorResponse(c, http.StatusBadRequest, "illegal_argument_exception", err.Error())
 		return
 	}
 
 	idx, err := s.getOrCreateIndex(name)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		s.errorResponse(c, http.StatusInternalServerError, "internal_server_error", err.Error())
 		return
 	}
 
 	doc, err := idx.Get(id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		s.errorResponse(c, http.StatusInternalServerError, "internal_server_error", err.Error())
 		return
 	}
 
@@ -766,21 +752,7 @@ func (s *Service) Update(c *gin.Context) {
 		} else if req.Upsert != nil {
 			doc = req.Upsert
 		} else {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": gin.H{
-					"root_cause": []gin.H{{
-						"type":   "document_missing_exception",
-						"reason": "document missing",
-						"index":  name,
-						"id":     id,
-					}},
-					"type":   "document_missing_exception",
-					"reason": "document missing",
-					"index":  name,
-					"id":     id,
-				},
-				"status": 404,
-			})
+			s.errorResponse(c, http.StatusNotFound, "document_missing_exception", "[_doc]["+id+"]: document missing")
 			return
 		}
 	} else {
@@ -793,7 +765,7 @@ func (s *Service) Update(c *gin.Context) {
 	}
 
 	if err := idx.Index(id, doc); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		s.errorResponse(c, http.StatusInternalServerError, "internal_server_error", err.Error())
 		return
 	}
 
@@ -944,7 +916,7 @@ func (s *Service) MGet(c *gin.Context) {
 	}
 
 	if err := c.BindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		s.errorResponse(c, http.StatusBadRequest, "illegal_argument_exception", err.Error())
 		return
 	}
 
@@ -1178,7 +1150,7 @@ func (s *Service) Get(c *gin.Context) {
 
 	doc, err := idx.Get(id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		s.errorResponse(c, http.StatusInternalServerError, "internal_server_error", err.Error())
 		return
 	}
 
@@ -1208,12 +1180,12 @@ func (s *Service) Delete(c *gin.Context) {
 
 	idx := s.manager.GetIndex(name)
 	if idx == nil {
-		c.JSON(http.StatusNotFound, gin.H{"found": false})
+		s.errorResponse(c, http.StatusNotFound, "index_not_found_exception", "no such index ["+name+"]")
 		return
 	}
 
 	if err := idx.Delete(id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		s.errorResponse(c, http.StatusInternalServerError, "internal_server_error", err.Error())
 		return
 	}
 
@@ -1230,11 +1202,19 @@ func (s *Service) Search(c *gin.Context) {
 	idx := s.manager.GetIndex(name)
 	if idx == nil {
 		c.JSON(http.StatusOK, gin.H{
-			"took": 0,
+			"took":      0,
+			"timed_out": false,
+			"_shards": gin.H{
+				"total":      1,
+				"successful": 1,
+				"skipped":    0,
+				"failed":     0,
+			},
 			"hits": gin.H{
 				"total": gin.H{"value": 0, "relation": "eq"},
 				"hits":  []interface{}{},
 			},
+			"aggregations": gin.H{},
 		})
 		return
 	}
@@ -1268,7 +1248,7 @@ func (s *Service) Search(c *gin.Context) {
 	}
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		s.errorResponse(c, http.StatusInternalServerError, "internal_server_error", err.Error())
 		return
 	}
 
