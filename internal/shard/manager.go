@@ -2,13 +2,14 @@ package shard
 
 import (
 	"breeze/internal/cluster"
-	"breeze/internal/mapping"
+	bmapping "breeze/internal/mapping"
 	"breeze/internal/store"
 	"encoding/json"
 	"fmt"
 	"hash/crc32"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/blevesearch/bleve/v2"
@@ -19,14 +20,27 @@ type Index struct {
 	Shards    map[int]*store.Store
 	numShards int
 	path      string
-	Mapping   *mapping.Mapping
+	Mapping   *bmapping.Mapping
 	Cluster   *cluster.Cluster
 	Forwarder *Forwarder
 	mu        sync.RWMutex
 }
 
+type IndexTemplate struct {
+	IndexPatterns []string               `json:"index_patterns"`
+	Settings      map[string]interface{} `json:"settings,omitempty"`
+	Mappings      map[string]interface{} `json:"mappings,omitempty"`
+	Template      *struct {
+		Settings map[string]interface{} `json:"settings,omitempty"`
+		Mappings map[string]interface{} `json:"mappings,omitempty"`
+	} `json:"template,omitempty"`
+	Priority int `json:"priority,omitempty"`
+	Order    int `json:"order,omitempty"`
+}
+
 type Manager struct {
 	indices          map[string]*Index
+	templates        map[string]IndexTemplate
 	basePath         string
 	defaultNumShards int
 	Cluster          *cluster.Cluster
@@ -41,10 +55,28 @@ func NewManager(basePath string, defaultNumShards int, c *cluster.Cluster) (*Man
 
 	m := &Manager{
 		indices:          make(map[string]*Index),
+		templates:        make(map[string]IndexTemplate),
 		basePath:         basePath,
 		defaultNumShards: defaultNumShards,
 		Cluster:          c,
 		Forwarder:        NewForwarder(),
+	}
+
+	// Load templates
+	templatePath := filepath.Join(basePath, "_templates")
+	os.MkdirAll(templatePath, 0755)
+	tEntries, _ := os.ReadDir(templatePath)
+	for _, entry := range tEntries {
+		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".json" {
+			data, err := os.ReadFile(filepath.Join(templatePath, entry.Name()))
+			if err == nil {
+				var t IndexTemplate
+				if err := json.Unmarshal(data, &t); err == nil {
+					name := strings.TrimSuffix(entry.Name(), ".json")
+					m.templates[name] = t
+				}
+			}
+		}
 	}
 
 	// Load existing indices
@@ -97,7 +129,7 @@ func (m *Manager) OpenIndex(name string) (*Index, error) {
 		numShards: numShards,
 		path:      indexPath,
 		Shards:    make(map[int]*store.Store),
-		Mapping:   mapping.NewMapping(),
+		Mapping:   bmapping.NewMapping(),
 		Cluster:   m.Cluster,
 		Forwarder: m.Forwarder,
 	}
@@ -125,6 +157,23 @@ func (m *Manager) OpenIndex(name string) (*Index, error) {
 	return idx, nil
 }
 
+func (m *Manager) PutTemplate(name string, t IndexTemplate) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.templates[name] = t
+	templatePath := filepath.Join(m.basePath, "_templates", name+".json")
+	data, _ := json.Marshal(t)
+	return os.WriteFile(templatePath, data, 0644)
+}
+
+func (m *Manager) GetTemplate(name string) (IndexTemplate, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	t, ok := m.templates[name]
+	return t, ok
+}
+
 func (m *Manager) CreateIndex(name string, numShards int, forward bool) (*Index, error) {
 	m.mu.Lock()
 	if _, ok := m.indices[name]; ok {
@@ -132,6 +181,39 @@ func (m *Manager) CreateIndex(name string, numShards int, forward bool) (*Index,
 		return m.indices[name], nil
 	}
 	m.mu.Unlock()
+
+	// Apply templates
+	var appliedTemplate *IndexTemplate
+	m.mu.RLock()
+	for tName, t := range m.templates {
+		for _, pattern := range t.IndexPatterns {
+			matched, _ := filepath.Match(pattern, name)
+			if matched {
+				fmt.Printf("Applying template %s to index %s\n", tName, name)
+				appliedTemplate = &t
+				break
+			}
+		}
+		if appliedTemplate != nil {
+			break
+		}
+	}
+	m.mu.RUnlock()
+
+	if numShards <= 0 && appliedTemplate != nil {
+		settings := appliedTemplate.Settings
+		if appliedTemplate.Template != nil && appliedTemplate.Template.Settings != nil {
+			settings = appliedTemplate.Template.Settings
+		}
+
+		if s, ok := settings["number_of_shards"].(float64); ok {
+			numShards = int(s)
+		} else if s, ok := settings["index"].(map[string]interface{}); ok {
+			if ns, ok := s["number_of_shards"].(float64); ok {
+				numShards = int(ns)
+			}
+		}
+	}
 
 	if numShards <= 0 {
 		numShards = m.defaultNumShards
@@ -145,6 +227,36 @@ func (m *Manager) CreateIndex(name string, numShards int, forward bool) (*Index,
 	idx, err := m.OpenIndex(name)
 	if err != nil {
 		return nil, err
+	}
+
+	if appliedTemplate != nil {
+		mappings := appliedTemplate.Mappings
+		if appliedTemplate.Template != nil && appliedTemplate.Template.Mappings != nil {
+			mappings = appliedTemplate.Template.Mappings
+		}
+
+		if props, ok := mappings["properties"].(map[string]interface{}); ok {
+			for k, v := range props {
+				if vm, ok := v.(map[string]interface{}); ok {
+					tStr, _ := vm["type"].(string)
+					var detected bmapping.FieldType
+					switch tStr {
+					case "text", "keyword":
+						detected = bmapping.TypeString
+					case "double", "float", "integer", "long":
+						detected = bmapping.TypeNumber
+					case "boolean":
+						detected = bmapping.TypeBoolean
+					default:
+						detected = bmapping.TypeObject
+					}
+					idx.Mapping.Mu.Lock()
+					idx.Mapping.Fields[k] = detected
+					idx.Mapping.Mu.Unlock()
+				}
+			}
+			idx.saveMapping()
+		}
 	}
 
 	if forward {
@@ -182,6 +294,36 @@ func (idx *Index) saveMapping() {
 	data, _ := json.Marshal(idx.Mapping.Fields)
 	idx.Mapping.Mu.RUnlock()
 	os.WriteFile(mappingPath, data, 0644)
+}
+
+func (idx *Index) saveMappingLocked() {
+	mappingPath := filepath.Join(idx.path, "mapping.json")
+	data, _ := json.Marshal(idx.Mapping.Fields)
+	os.WriteFile(mappingPath, data, 0644)
+}
+
+func (idx *Index) UpdateMapping(props map[string]interface{}) {
+	idx.Mapping.Mu.Lock()
+	defer idx.Mapping.Mu.Unlock()
+
+	for k, v := range props {
+		if vm, ok := v.(map[string]interface{}); ok {
+			tStr, _ := vm["type"].(string)
+			var detected bmapping.FieldType
+			switch tStr {
+			case "text", "keyword":
+				detected = bmapping.TypeString
+			case "double", "float", "integer", "long":
+				detected = bmapping.TypeNumber
+			case "boolean":
+				detected = bmapping.TypeBoolean
+			default:
+				detected = bmapping.TypeObject
+			}
+			idx.Mapping.Fields[k] = detected
+		}
+	}
+	idx.saveMappingLocked()
 }
 
 func (idx *Index) GetShardID(id string) int {
